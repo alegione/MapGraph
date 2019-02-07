@@ -1,0 +1,23 @@
+#!/bin/bash
+
+basename -a -s '.sam' ~/Sequences/MinION/NanostatWTP/MiniMap/CARD/*sam > filelist.txt
+
+while read i; do
+	echo $i
+	if [ ! -d "$i.CARD" ]; then
+		mkdir "$i.CARD"
+	fi
+	cd "$i.CARD"
+	if [ ! -e "../$i.bam" ]; then
+		samtools view -bS "../$i.sam" > "../$i.bam"
+	fi
+
+	genomeCoverageBed -ibam "../$i.bam" -d > "$i.cov.txt"
+	awk ' $3 > 1 ' "$i.cov.txt" | cut -f1 | uniq | cut -f6 -d "|" | sort | sed 's/\//_/g' > "$i.genes2.txt"
+ 	while read j; do
+		if [ ! -e "$i.$j.cov.txt" ]; then
+			grep "$j" "$i.cov.txt" > "$i.$j.cov.txt"
+		fi
+	done < "$i.genes2.txt"
+	cd ..
+done < filelist.txt
