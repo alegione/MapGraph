@@ -1,23 +1,124 @@
 #!/bin/bash
 
-basename -a -s '.sam' ~/Sequences/MinION/NanostatWTP/MiniMap/CARD/*sam > filelist.txt
+#get CPU and RAM metrics
+CORES=$(nproc)
+RAM=$(free -g | tr -s "[:space:]" "\t" | cut -f11)
+
+#Set colour variables
+RED='\033[1;31m'
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[1;34m'
+PURPLE='\033[1;35m'
+NOCOLOUR='\033[0m'
+#USE THIS TO STRIP COLOUR FROM FILES: sed 's/\x1b\[[0-9;]*m//g'
+
+#get screen size and maximise
+LINE=`xrandr -q | grep Screen`
+WIDTH=`echo ${LINE} | awk '{ print $8 }'`
+HEIGHT=`echo ${LINE} | awk '{ print $10 }' | awk -F"," '{ print $1 }'`
+echo -e "\e[4;$HEIGHT;${WIDTH}t"
+
+GenePlot="$HOME/Documents/Coding/R/MiniMap_plot/bash_plot.R"
+varRscript="/usr/bin/Rscript"
+
+echo -e "${YELLOW}Input read directory path:${NOCOLOUR}"
+read -e FileDir
+
+echo -e "${YELLOW}Input reference genome file path:${NOCOLOUR}"
+read -e RefGenome
+fastaCount=$(grep -c ">" "$RefGenome")
+
+if [ $fastaCount -gt "1" ]; then
+	Switch=0
+	while [ "$Switch" -eq "0" ]; do
+		echo -e "${YELLOW}Multi-fasta detected, please select from below options:${NOCOLOUR}"
+		echo -e "${YELLOW}1 - Multi-fasta is a segmented single genome${NOCOLOUR}"
+		echo -e "${YELLOW}2 - Multi-fasta is a database of different references${NOCOLOUR}"
+		read -e RefType
+		case $RefType in
+			1)
+				echo -e "${GREEN}Multi-fasta is a segmented single genome${NOCOLOUR}" | tee -a $Progress
+				RefType="Segmented"
+				Switch=1
+				;;
+			2)
+				echo -e "${GREEN}Multi-fasta is a database of different references${NOCOLOUR}" | tee -a $Progress
+				RefType="Database"
+				Switch=1
+				;;
+			*)
+				echo -e "${RED}ERROR: Please only type 1 or 2${NOCOLOUR}"
+				;;
+		esac
+	done
+else
+	RefType="Single"
+fi
+
+echo -e "${YELLOW}Input directory for output:${NOCOLOUR}"
+read -e ProjectDir
+ProjectName=$(basename $ProjectDir)
+
+if [ ! -d $ProjectDir ]; then
+	mkdir "$ProjectDir"
+	mkdir "$ProjectDir/Metadata"
+fi
+
+if [ ! -d $"$ProjectDir/Metadata" ]; then
+	mkdir "$ProjectDir/Metadata"
+fi
+
+if [ ! -e "$ProjectDir/Metadata/readlist.txt" ]; then
+	basename -a -s '.fastq' $FileDir/*fastq > "$ProjectDir/Metadata/readlist.txt"
+fi
+
+#awk ' $3 > 5 ' WTPv1_07_BC01.cov.txt | cut -f1 | uniq | cut -f6 -d "|" | sort | sed 's/\//_/g' | while read i; do grep "$i" WTPv1_07_BC01.cov.txt > WTPv1_07_BC01.$i.cov.txt; done
+
+
+#basename -a -s '.sam' * | while read i; do echo $i; samtools view -bS $i.sam > "$i.bam"; samtools sort $i.bam > $i.sort.bam; genomeCoverageBed -ibam $i.sort.bam -d > $i.cov.txt; done
 
 while read i; do
-	echo $i
-	if [ ! -d "$i.CARD" ]; then
-		mkdir "$i.CARD"
+	echo -e "${GREEN}$i${NOCOLOUR}"
+
+	if [ ! -e "$ProjectDir/$i.sam" ]; then
+		minimap2 -t $CORES -a -x map-ont $RefGenome "$FileDir/$i.fastq" | samtools view -@ $CORES -h -F 4 > "$ProjectDir/$i.sam"
 	fi
-	cd "$i.CARD"
-	if [ ! -e "../$i.bam" ]; then
-		samtools view -bS "../$i.sam" > "../$i.bam"
+	hits=$(grep -v -c "^@" "$ProjectDir/$i.sam")
+	if [ $hits -eq "0" ]; then
+		rm "$ProjectDir/$i.sam"
+		continue
 	fi
 
-	genomeCoverageBed -ibam "../$i.bam" -d > "$i.cov.txt"
-	awk ' $3 > 1 ' "$i.cov.txt" | cut -f1 | uniq | cut -f6 -d "|" | sort | sed 's/\//_/g' > "$i.genes2.txt"
- 	while read j; do
-		if [ ! -e "$i.$j.cov.txt" ]; then
-			grep "$j" "$i.cov.txt" > "$i.$j.cov.txt"
+	if [ ! -e "$ProjectDir/$i.sort.bam" ]; then
+		samtools view -@ $CORES -bS "$ProjectDir/$i.sam" > "$ProjectDir/$i.bam"
+		samtools sort -@ $CORES "$ProjectDir/$i.bam" > "$ProjectDir/$i.sort.bam"
+		rm "$ProjectDir/$i.bam"
+	fi
+
+	if [ ! -e "$ProjectDir/$i.cov.txt" ]; then
+		genomeCoverageBed -ibam "$ProjectDir/$i.sort.bam" -d > "$ProjectDir/$i.cov.txt"
+	fi
+
+	if [ $RefType == "Database" ]; then
+		if [ ! -d "$ProjectDir/$i" ]; then
+			mkdir "$ProjectDir/$i"
 		fi
-	done < "$i.genes2.txt"
-	cd ..
-done < filelist.txt
+		if [ ! -e "$ProjectDir/Metadata/$i.genes.txt" ]; then
+			awk ' $3 > 1 ' "$ProjectDir/$i.cov.txt" | cut -f1 | uniq | cut -f6 -d "|" | sort | sed 's/\//_/g' > "$ProjectDir/Metadata/$i.genes.txt"
+		fi
+ 		while read j; do
+			if [ ! -e "$ProjectDir/$i/$i.$j.cov.txt" ]; then
+				grep "$j" "$ProjectDir/$i.cov.txt" > "$ProjectDir/$i/$i.$j.cov.txt"
+			fi
+			if [ ! -e "$ProjectDir/$i/$i-$j.png" ]; then
+				$varRscript $GenePlot "$ProjectDir/$i/" "$i.$j.cov.txt" "$ProjectName" "$RefType" "$i" "$j"
+			fi
+		done < "$ProjectDir/Metadata/$i.genes.txt"
+
+	else
+		if [ ! -e "$ProjectDir/$ProjectName-$i.png" ]; then
+			$varRscript $GenePlot "$ProjectDir/" "$i.cov.txt" "$ProjectName" "$RefType" "$i"
+		fi
+	fi
+done < "$ProjectDir/Metadata/readlist.txt"
